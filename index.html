@@ -1,0 +1,276 @@
+// --- THREE.JS GLOBALS ---
+   let scene, camera, renderer;
+   let carMesh, sunMesh;
+   let clock = new THREE.Clock();
+
+   // --- GAME CONSTANTS (Tuned for 3D/Meters) ---
+   const ROAD_WIDTH = 45; // Increased road width for 3 lanes
+   const BASE_MAX_SPEED = 70; // Max velocity in units/second (m/s)
+   const BASE_ACCELERATION = 40; // Acceleration rate (units/s^2)
+  
+   const BRAKE_ACCEL = 16;
+   const FRICTION = 4;
+   const STEERING_SPEED = 0.5;
+   const MAX_TURN_ANGLE = Math.PI / 6;
+  
+   // BOOST PARAMETERS
+   const BOOST_MULTIPLIER = 1.875;
+   const BOOST_DURATION = 3.0; // Seconds of boost
+   let boostTimer = 0;
+
+   // TRAFFIC PARAMETERS
+   const OPPONENT_SPEED_MS = 70.38; // ~157 MPH (70.38 units/s)
+   const OPPONENT_SPAWN_DISTANCE = 16.5;
+   const LANE_POSITIONS = [-15, 0, 15]; // Three clear lanes on a 45-width road
+
+   // AESTHETICS
+   const ROAD_COLOR = 0x222222;
+   const SKY_COLOR = 0x87CEEB;
+   const TERRAIN_COLOR = 0x38761D; // Green Grass
+   const ROAD_PAINT_COLOR = 0xbbbbbb;
+   const CAR_COLOR = 0x0077ff;
+   const WHEEL_COLOR = 0x111111;
+   const RIM_COLOR = 0xcccccc; // Silver for rims
+   const HEADLIGHT_COLOR = 0xffffaa;
+   const TAILLIGHT_COLOR = 0xff0000;
+   const SUN_COLOR = 0xffe400;
+
+   const BARRIER_HEIGHT = 2;
+   const BARRIER_WIDTH = 1;
+   const BARRIER_COLOR = 0x555555;
+   const OFF_ROAD_FRICTION_MULTIPLIER = 4; // Higher drag off road
+
+   // Dynamic Road Section
+   const ROAD_SEGMENT_LENGTH = 100; // Length of each road segment
+   const NUM_ROAD_SEGMENTS = 10;   // Number of segments to keep visible
+   const TOTAL_ROAD_LENGTH = ROAD_SEGMENT_LENGTH * NUM_ROAD_SEGMENTS; // Total visible road at any time
+
+   const ENVIRONMENT_VIEW_DISTANCE = TOTAL_ROAD_LENGTH / 2 + 500; // Adjusted view distance based on road segments
+
+
+   // ENVIRONMENT OBJECT COUNTS
+   const NUM_TREES = 150;
+   const NUM_COWS = 15;
+   const ENVIRONMENT_WIDTH = 500; // Total width for object scattering
+   const MIN_DISTANCE_FROM_ROAD = ROAD_WIDTH / 2 + BARRIER_WIDTH + 5; // Start placing objects 5 units from the barrier
+
+   // --- GAME STATE ---
+   let gameLoopInterval;
+   let isGameRunning = false;
+   let opponentCars = [];
+   let lastSpawnZ = 0;
+   let nextSpawnDistance = 0;
+   let roadSegments = []; // Array to hold road segment meshes
+   let lastPlayerZ = 0; // To track player's Z position for road segment management
+  
+   const car = {
+       speed: 0,
+       steerAngle: 0,
+       score: 0,
+       isOffRoad: false,
+       isBoosting: false
+   };
+
+   // Input State
+   const keys = {
+       up: false, down: false, left: false, right: false, boost: false
+   };
+  
+   // UI Elements
+   const container = document.getElementById('threejs-container');
+   const messageBox = document.getElementById('message-box');
+   const startButton = document.getElementById('startButton');
+   const speedDisplay = document.getElementById('speed-display');
+   const scoreDisplay = document.getElementById('score-display');
+   const statusDisplay = document.getElementById('status-display');
+   const boostButton = document.getElementById('boostButton');
+
+   // --- UTILITY FUNCTIONS ---
+
+   /**
+    * Converts raw speed (units/s) to MPH for display.
+    */
+   function calculateMPH(speed) {
+       // 1 m/s is approx 2.23694 MPH
+       return Math.round(Math.abs(speed) * 2.23694);
+   }
+  
+   /**
+    * Creates a reusable car mesh (used for both player and traffic).
+    * @param {number} mainColor - The primary color of the car.
+    * @param {boolean} isPlayer - True if creating the player's car, false for opponent.
+    */
+   function createDetailedCar(mainColor, isPlayer = false) {
+       const carGroup = new THREE.Group();
+      
+       const wheelMaterial = new THREE.MeshPhongMaterial({ color: WHEEL_COLOR });
+       const rimMaterial = new THREE.MeshPhongMaterial({ color: RIM_COLOR, shininess: 100 });
+
+       // --- OPPONENT CAR LOGIC (Simple, neon block) ---
+       if (!isPlayer) {
+           // Generate a bright, random neon color
+           const neonColors = [0x00ffff, 0xff00ff, 0x00ff00, 0xffff00];
+           const neonColor = neonColors[Math.floor(Math.random() * neonColors.length)];
+
+           // Highly Emissive Material: Lights up the dark scene
+           const opponentMaterial = new THREE.MeshBasicMaterial({
+               color: neonColor,
+               emissive: neonColor,
+               emissiveIntensity: 3.5 // Extremely bright glow
+           });
+          
+           // Simple Box Body
+           const bodyGeometry = new THREE.BoxGeometry(3.0, 1.0, 4.0); // Simple block shape
+           const bodyMesh = new THREE.Mesh(bodyGeometry, opponentMaterial);
+           bodyMesh.position.y = 0.8;
+           bodyMesh.castShadow = true;
+           // Add collision properties
+           bodyMesh.userData.isCarBody = true;
+           bodyMesh.userData.isPlayer = isPlayer;
+           bodyMesh.userData.collisionBox = new THREE.Box3().setFromObject(bodyMesh);
+
+           carGroup.add(bodyMesh);
+
+           // Wheels for opponents (still dark and simple)
+           const wheelRadius = 0.4;
+           const wheelThickness = 0.6;
+           const wheelGeometry = new THREE.CylinderGeometry(wheelRadius, wheelRadius, wheelThickness, 8);
+           const wheelOffsetZ = 1.7;
+           const wheelOffsetX = 1.5;
+           const wheelPosY = wheelRadius;
+
+           function addOpponentWheel(x, z) {
+               const tire = new THREE.Mesh(wheelGeometry, wheelMaterial);
+               tire.position.set(x, wheelPosY, z);
+               tire.rotation.x = Math.PI / 2;
+               carGroup.add(tire);
+           }
+          
+           addOpponentWheel(wheelOffsetX, wheelOffsetZ);    // Front Left
+           addOpponentWheel(-wheelOffsetX, wheelOffsetZ);   // Front Right
+           addOpponentWheel(wheelOffsetX, -wheelOffsetZ);   // Rear Left
+           addOpponentWheel(-wheelOffsetX, -wheelOffsetZ);  // Rear Right
+          
+           carGroup.userData.collisionMesh = bodyMesh; // Store the main body for collision checks
+           carGroup.userData.isOpponent = true;
+
+           return carGroup;
+       }
+
+       // --- PLAYER CAR LOGIC (Detailed, as before) ---
+       const carMaterial = new THREE.MeshPhongMaterial({ color: mainColor, shininess: 80 });
+      
+       // Taillight Material: Increased emissive intensity to ensure high visibility and glow
+       const taillightMaterial = new THREE.MeshPhongMaterial({
+           color: TAILLIGHT_COLOR,
+           emissive: TAILLIGHT_COLOR,
+           emissiveIntensity: 2.0 // High glow
+       });
+       const headlightMaterial = new THREE.MeshPhongMaterial({ color: HEADLIGHT_COLOR, emissive: HEADLIGHT_COLOR, emissiveIntensity: 0.8 });
+
+       // Main Body Shape (Slightly tapered)
+       const bodyShape = new THREE.Shape();
+       bodyShape.moveTo(0, 0);
+       bodyShape.lineTo(2.5, 0);
+       bodyShape.lineTo(2.5, 0.8);
+       bodyShape.lineTo(1.5, 1.2); // Mid section height
+       bodyShape.lineTo(-1.5, 1.2);
+       bodyShape.lineTo(-2.5, 0.8);
+       bodyShape.lineTo(-2.5, 0);
+       bodyShape.lineTo(0, 0);
+
+       const bodyExtrudeSettings = {
+           steps: 1,
+           depth: 3.5, // Length of the car
+           bevelEnabled: true,
+           bevelThickness: 0.1,
+           bevelSize: 0.1,
+           bevelOffset: 0,
+           bevelSegments: 1
+       };
+
+       const carBodyGeometry = new THREE.ExtrudeGeometry(bodyShape, bodyExtrudeSettings);
+       carBodyGeometry.center();
+       const carBodyMesh = new THREE.Mesh(carBodyGeometry, carMaterial);
+       carBodyMesh.rotation.y = Math.PI / 2;
+       carBodyMesh.position.y = 0.8;
+       carBodyMesh.scale.set(1.5, 1.5, 1.5);
+       carBodyMesh.castShadow = true;
+
+           // Add collision properties for player
+           carBodyMesh.userData.isCarBody = true;
+           carBodyMesh.userData.isPlayer = isPlayer;
+           carBodyMesh.userData.collisionBox = new THREE.Box3().setFromObject(carBodyMesh);
+
+       carGroup.add(carBodyMesh);
+      
+       // --- Turbo Cooler / Hood Scoop ---
+       const scoopGeometry = new THREE.BoxGeometry(1.2, 0.2, 1.0);
+       const scoopMaterial = new THREE.MeshPhongMaterial({ color: 0x1a1a1a, shininess: 50 }); // Dark color
+       const scoopMesh = new THREE.Mesh(scoopGeometry, scoopMaterial);
+      
+       // Position on the hood area
+       scoopMesh.position.set(0, 1.5, 1.8);
+       scoopMesh.castShadow = true;
+       carGroup.add(scoopMesh);
+
+
+       // --- Cabin/Windshield/Roof (Tinted Glass) ---
+       const cabinGeometry = new THREE.BoxGeometry(3.0, 1.0, 2.8); // Wider and taller
+       const cabinMaterial = new THREE.MeshStandardMaterial({
+           color: 0x444444,
+           roughness: 0.5,
+           metalness: 0.8,
+           transparent: true,
+           opacity: 0.5      // Tinted glass effect
+       });
+
+       const cabinMesh = new THREE.Mesh(cabinGeometry, cabinMaterial);
+       cabinMesh.position.set(0, 1.8, 0.5);
+      
+       // Apply taper and angling for the windshield/roofline
+       const position = cabinMesh.geometry.getAttribute('position');
+       const tempVector = new THREE.Vector3();
+
+       for (let i = 0; i < position.count; i++) {
+           tempVector.fromBufferAttribute(position, i);
+          
+           if (tempVector.y > 0.3) {
+               tempVector.x *= 0.9;
+           }
+          
+           if (tempVector.z > 1.2) {
+               tempVector.y -= (tempVector.z - 1.2) * 0.5;
+               tempVector.x *= 0.95;
+           }
+           else if (tempVector.z < -1.0) {
+               tempVector.y -= (-1.0 - tempVector.z) * 0.4;
+               tempVector.x *= 0.9;
+           }
+          
+           position.setXYZ(i, tempVector.x, tempVector.y, tempVector.z);
+       }
+       position.needsUpdate = true;
+       cabinGeometry.computeVertexNormals();
+
+       cabinMesh.castShadow = true;
+       carGroup.add(cabinMesh);
+
+       // --- Wheels/Tires/Rims ---
+       const wheelRadius = 0.4;
+       const wheelThickness = 0.6;
+       const wheelGeometry = new THREE.CylinderGeometry(wheelRadius, wheelRadius, wheelThickness, 16);
+       const rimGeometry = new THREE.CylinderGeometry(wheelRadius * 0.6, wheelRadius * 0.6, wheelThickness + 0.05, 12);
+
+       const wheelOffsetZ = 1.7;
+       const wheelOffsetX = 1.5;
+       const wheelPosY = wheelRadius;
+
+       function addWheel(x, z) {
+           const tire = new THREE.Mesh(wheelGeometry, wheelMaterial);
+           tire.position.set(x, wheelPosY, z);
+           tire.rotation.x = Math.PI / 2;
+           tire.castShadow = true;
+           carGroup.add(tire);
+          
+           const rim = new THREE.Mesh(
